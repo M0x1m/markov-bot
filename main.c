@@ -2,7 +2,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <ucontext.h>
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
@@ -91,14 +90,14 @@ string_view sv_trim(string_view sv)
 int sv_to_int(string_view sv)
 {
     char buf[32];
-    snprintf(buf, 32, SV_Fmt, SV_Arg(sv));
+    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
     return atoi(buf);
 }
 
 uint64_t sv_to_u64(string_view sv)
 {
     char buf[32];
-    snprintf(buf, 32, SV_Fmt, SV_Arg(sv));
+    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
     return strtoull(buf, NULL, 0);
 }
 
