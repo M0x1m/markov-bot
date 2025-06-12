@@ -263,9 +263,11 @@ int file_read_unicode(FILE *f)
 void bytes_append_utf8_codepoint(bot_async_ctx *ctx, struct bytes_array *a, uint32_t c)
 {
     int b = 0, l = 0;
-    while (c>>++b) ;;
+    while (c>>++b)
+        ;;
     int t = (b > 7) | (b > 11) << 1 | (b > 16) << 2;
-    while (t>>l++) ;;
+    while (t>>l++)
+        ;;
 
     switch (l) {
     case 1: da_append2(a, c, &ctx->a, arena_realloc); break;
