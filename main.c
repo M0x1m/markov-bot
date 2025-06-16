@@ -379,7 +379,7 @@ void bio_send_cstr(struct bufio *bio, const char *cstr)
 
 void async_bot_telegram_post_method(bot_async_ctx *ctx, const char *method, json_object *obj)
 {
-    char buf[256];
+    char *buf = arena_alloc(&ctx->a, 256);
 
     struct bufio *bio = ctx->bio;
     const char *body = json_object_to_json_string(obj);
@@ -971,6 +971,7 @@ int main(void)
     bot_receive_events(&bot);
 
     bot_event_loop(&bot);
+    bot_save_markov(&bot);
 
     SSL_CTX_free(bot.ssl_ctx);
     return 0;
