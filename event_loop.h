@@ -17,6 +17,7 @@ struct pollable {
     int flags;
     int finished;
     int timeout;
+    int elapsed;
     jmp_buf on_closed;
     struct event_loop *el;
     cothread_t poll_ctx;
@@ -62,7 +63,7 @@ void event_loop_add(struct event_loop *el, int fd, int fl, void (*func)(struct p
     p->fd = fd;
     p->flags = fl;
     p->el = el;
-    p->timeout = -1;
+    if (p->fd >= 0) p->timeout = -1;
 
     p->poll_ctx = co_derive(p->stack, sizeof p->stack, libco_wrapper);
 
@@ -89,21 +90,35 @@ void event_loop_next(struct event_loop *el)
         pfds[i].fd = this->fd;
         pfds[i].events = this->flags;
         if (this->timeout < 0) continue;
-        if (timeout == -1 || timeout > this->timeout) {
-            timeout = this->timeout;
+
+        int remaining = this->timeout - this->elapsed;
+        if (remaining < 0) remaining = 0;
+        if (timeout == -1 || timeout > remaining) {
+            timeout = remaining;
         }
     }
 
-    poll(pfds, el->count, timeout);
-    for (size_t i = 0; i < el->count; ++i) {
-        if (!pfds[i].revents && pfds[i].fd >= 0) continue;
-        struct pollable *current = el->items[i];
+    struct timespec begin, end;
+    clock_gettime(CLOCK_MONOTONIC, &begin);
 
-        current->flags = pfds[i].revents;
-        co_switch(current->poll_ctx);
-        if (!current->finished) continue;
+    poll(pfds, el->count, timeout);
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    int ms_passed = (end.tv_sec - begin.tv_sec) * 1000 + (end.tv_nsec - begin.tv_nsec) / 1000000;
+    for (size_t i = 0; i < el->count; ++i) {
+        struct pollable *const c = el->items[i];
+        c->elapsed += ms_passed;
+        const int ready = pfds[i].revents;
+        const int timed_out = c->timeout >= 0 && c->elapsed >= c->timeout;
+        if (!ready && !timed_out) continue;
+
+        c->flags = pfds[i].revents;
+        co_switch(c->poll_ctx);
+        c->elapsed = 0;
+
+        if (!c->finished) continue;
         finished[finished_len++] = i;
-        free(current);
+        free(c);
     }
 
     for (size_t i = finished_len; i > 0; --i) {

@@ -750,8 +750,8 @@ void async_bot_request_get_updates(bot_async_ctx *ctx)
 {
     json_object *json = json_object_new_object();
 
-    json_object_object_add(json, "timeout", json_object_new_int(3600));
-    ctx->pollable->timeout = 3600 * 1000;
+    json_object_object_add(json, "timeout", json_object_new_int(600));
+    ctx->pollable->timeout = 600 * 1000;
     if (ctx->bot->last_confirmed) {
         json_object_object_add(json, "offset", json_object_new_int(ctx->bot->last_confirmed + 1));
     }
@@ -812,9 +812,11 @@ void async_wrapper(struct pollable *this, void *data)
     struct secure_fd fd;
     bot_async_ctx ctx = {0};
 
-    ctx.bio = malloc(sizeof *ctx.bio);
     ctx.pollable = this;
     ctx.bot = closure->bot;
+    if (this->fd < 0) goto func;
+
+    ctx.bio = malloc(sizeof *ctx.bio);
 
     fd.ssl = SSL_new(closure->bot->ssl_ctx);
     if (fd.ssl == NULL) goto done;
@@ -828,6 +830,7 @@ void async_wrapper(struct pollable *this, void *data)
 
     bio_init(ctx.bio, &fd, secure_read, secure_write);
 
+func:
     closure->func(&ctx, closure->data);
 
  done:
@@ -908,11 +911,8 @@ int bot_connect(void)
     return sock;
 }
 
-int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data)
+void bot_add_task(struct bot *bot, int fd, bot_async_fn func, void *func_data)
 {
-    int fd = bot_connect();
-    if (fd < 0) return -1;
-
     struct bot_async_closure *closure = malloc(sizeof *closure);
 
     closure->bot = bot;
@@ -920,6 +920,14 @@ int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data)
     closure->data = func_data;
 
     event_loop_add(&bot->el, fd, POLLOUT, async_wrapper, closure);
+}
+
+int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data)
+{
+    int fd = bot_connect();
+    if (fd < 0) return -1;
+
+    bot_add_task(bot, fd, func, func_data);
 
     return 0;
 }
