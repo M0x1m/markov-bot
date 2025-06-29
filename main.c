@@ -773,7 +773,14 @@ void async_bot_request_get_updates(bot_async_ctx *ctx)
     json_object *body = json_tokener_parse_ex(tokener, body_data, len);
     json_tokener_free(tokener);
 
+    if (!body) return;
+
     json_object *updates = json_object_object_get(body, "result");
+    if (!updates || !json_object_is_type(updates, json_type_array)) {
+        json_object_put(body);
+        return;
+    }
+
     int updates_len = json_object_array_length(updates);
 
     for (int i = 0; i < updates_len; ++i) {
