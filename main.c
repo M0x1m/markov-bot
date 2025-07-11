@@ -107,8 +107,8 @@ int get_addr(const char *name)
     hint.ai_family = AF_INET;
 
     struct addrinfo *result;
-    getaddrinfo(name, NULL, &hint, &result);
-    if (result == NULL) return -1;
+    int ret = getaddrinfo(name, NULL, &hint, &result);
+    if (ret) return -1;
 
     return ((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr;
 }
@@ -898,17 +898,19 @@ void async_bot_set_my_commands(bot_async_ctx *ctx, void *data)
 
 int bot_connect(void)
 {
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(443);
+    int host_addr = get_addr(HOST);
+    if (host_addr == -1) return -1;
+    addr.sin_addr.s_addr = host_addr;
+
     int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
 
     if (sock < 0) {
         fprintf(stderr, "ERROR: could not create socket: %s\n", strerror(errno));
         abort();
     }
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(443);
-    addr.sin_addr.s_addr = get_addr(HOST);
 
     int ret = connect(sock, (struct sockaddr *)&addr, sizeof addr);
     if (ret < 0 && errno != EINPROGRESS) {
