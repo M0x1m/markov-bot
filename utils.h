@@ -298,6 +298,7 @@ UTILS_DEF void hashmap_resize(struct common_hashmap *ch, size_t item_size)
 {
     struct common_hashmap old = *ch;
     ch->capacity = old.capacity ? old.capacity * 2 : HASHMAP_INITIAL_CAP;
+    ch->count = 0;
 
     if (ch->ator) {
         ch->items = ch->alloc(ch->ator, item_size * ch->capacity);
