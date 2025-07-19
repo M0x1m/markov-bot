@@ -34,73 +34,6 @@
 
 #define WINDOW_SIZE 8
 
-#define SV_Arg(sv) (int)(sv).count, (sv).data
-#define SV_Fmt "%.*s"
-
-string_view sv_chop(string_view *sv, size_t n)
-{
-    if (sv->count < n) n = sv->count;
-    string_view chopped = {
-        .data = sv->data,
-        .count = n
-    };
-
-    sv->count -= n;
-    sv->data += n;
-    return chopped;
-}
-
-string_view sv_chop_by_delim(string_view *sv, int delim)
-{
-    size_t i = 0;
-
-    while (i < sv->count && sv->data[i] != delim) {
-        i++;
-    }
-
-    return sv_chop(sv, i);
-}
-
-string_view sv_trim_right(string_view sv)
-{
-    size_t i = 0;
-    while (i < sv.count && isspace(sv.data[sv.count - i - 1])) {
-        i++;
-    }
-
-    return sv_chop(&sv, sv.count - i);
-}
-
-string_view sv_trim_left(string_view sv)
-{
-    size_t i = 0;
-    while (i < sv.count && isspace(sv.data[i])) {
-        i++;
-    }
-
-    sv_chop(&sv, i);
-    return sv;
-}
-
-string_view sv_trim(string_view sv)
-{
-    return sv_trim_right(sv_trim_left(sv));
-}
-
-int sv_to_int(string_view sv)
-{
-    char buf[32];
-    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
-    return atoi(buf);
-}
-
-uint64_t sv_to_u64(string_view sv)
-{
-    char buf[32];
-    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
-    return strtoull(buf, NULL, 0);
-}
-
 int get_addr(const char *name)
 {
     struct addrinfo hint = {0};
@@ -128,6 +61,9 @@ struct markov_prefix_children {
     uint8_t *bitmap;
     uint64_t (*hashf)(const void *);
     int (*compare)(const void *, const void *);
+    void *(*alloc)(void *, size_t);
+    void (*free)(void *, void *, size_t);
+    void *ator;
     size_t count;
     size_t capacity;
 };
@@ -190,6 +126,9 @@ struct markov_chain {
     uint8_t *bitmap;
     uint64_t (*hashf)(const void *);
     int (*compare)(const void *, const void *);
+    void *(*alloc)(void *, size_t);
+    void (*free)(void *, void *, size_t);
+    void *ator;
     size_t count;
     size_t capacity;
     uint64_t freq;
@@ -233,20 +172,6 @@ typedef void (*bot_async_fn)(bot_async_ctx *, void *);
             }                                                   \
         }                                                       \
     } while (0)
-
-int sv_read_unicode(string_view *sv)
-{
-#define X *(uint8_t*)sv_chop(sv, 1).data
-    uint32_t c = X;
-
-    if (!(c >> 7))        return c;
-    if ((c >> 5) == 6)    return (c & 0x1f) << 6 | (X & 0x3f);
-    if ((c >> 4) == 0xe)  return (c & 0xf) << 12 | (X & 0x3f) << 6 | (X & 0x3f);
-    if ((c >> 3) == 0x1e) return (c & 0x7) << 18 | (X & 0x3f) << 12
-                              | (X & 0x3f) << 6 | (X & 0x3f);
-#undef X
-    return -1;
-}
 
 int file_read_unicode(FILE *f)
 {

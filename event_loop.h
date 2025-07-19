@@ -5,6 +5,8 @@
 #include <setjmp.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 
 #ifndef POLLABLE_STACK_SIZE
 #define POLLABLE_STACK_SIZE 8192

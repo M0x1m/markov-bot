@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <assert.h>
+#include <ctype.h>
 
 #ifndef UTILS_H_
 #define UTILS_H_
@@ -11,6 +12,9 @@
 #define ARRAY_LEN(xs) (sizeof(xs)/sizeof((xs)[0]))
 
 struct common_hashmap;
+
+#define SV_Arg(sv) (int)(sv).count, (sv).data
+#define SV_Fmt "%.*s"
 
 #define da_alloc(da, c)                                                 \
     do {                                                                \
@@ -177,6 +181,7 @@ UTILS_DEF struct nbt_tag *deserialize_nbt(struct bytes_array *nbt, arena *a);
 UTILS_DEF struct nbt_tag *nbt_compound_find_tag(struct nbt_tag *root, const char *name);
 UTILS_DEF uint32_t murmur3_32(const uint8_t* key, size_t len, uint32_t seed);
 UTILS_DEF void *arena_alloc(arena *a, size_t n);
+UTILS_DEF void *arena_alloc_ex(arena *a, size_t n, size_t cap);
 UTILS_DEF void *arena_realloc(arena *a, void *p, size_t old_size, size_t new_size);
 UTILS_DEF void *bytes_array_shift(struct bytes_array *b, size_t n);
 UTILS_DEF void *hashmap_get__(void *base, size_t item_size, void *key);
@@ -184,11 +189,26 @@ UTILS_DEF void arena_free(arena *a);
 UTILS_DEF void change_endian(void *d, size_t n);
 UTILS_DEF void hashmap_resize(struct common_hashmap *ch, size_t item_size);
 UTILS_DEF void print_nbt(struct nbt_tag *tag, int level);
+UTILS_DEF uint64_t sv_to_u64(string_view sv);
+UTILS_DEF int sv_to_int(string_view sv);
+UTILS_DEF string_view sv_trim(string_view sv);
+UTILS_DEF string_view sv_trim_left(string_view sv);
+UTILS_DEF string_view sv_trim_right(string_view sv);
+UTILS_DEF string_view sv_chop_by_delim(string_view *sv, int delim);
+UTILS_DEF string_view sv_chop(string_view *sv, size_t n);
+UTILS_DEF float sv_to_float(string_view sv);
+UTILS_DEF string_view sv_chop_while(string_view *sv, int (*pred)(int));
+UTILS_DEF int sv_read_unicode(string_view *sv);
+UTILS_DEF string_view sv_clone(string_view sv, arena *a);
 
 #ifdef UTILS_IMPLEMENTATION
 
 #include <assert.h>
+
+#ifndef UTILS_DISABLE_ZLIB
 #include <zlib.h>
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -264,6 +284,9 @@ struct common_hashmap {
     uint8_t *bitmap;
     uint64_t (*hashf)(const void *);
     int (*compare)(const void *, const void *);
+    void *(*alloc)(void *, size_t);
+    void (*free)(void *, void *, size_t);
+    void *ator;
     size_t count;
     size_t capacity;
 };
@@ -274,12 +297,16 @@ struct common_hashmap {
 UTILS_DEF void hashmap_resize(struct common_hashmap *ch, size_t item_size)
 {
     struct common_hashmap old = *ch;
-    memset(ch, 0, sizeof(*ch));
-    ch->compare = old.compare;
-    ch->hashf = old.hashf;
     ch->capacity = old.capacity ? old.capacity * 2 : HASHMAP_INITIAL_CAP;
-    ch->items = malloc(item_size * ch->capacity);
-    ch->bitmap = malloc((ch->capacity + 7)/8);
+
+    if (ch->ator) {
+        ch->items = ch->alloc(ch->ator, item_size * ch->capacity);
+        ch->bitmap = ch->alloc(ch->ator, (ch->capacity + 7)/8);
+    } else {
+        ch->items = malloc(item_size * ch->capacity);
+        ch->bitmap = malloc((ch->capacity + 7)/8);
+    }
+
     memset(ch->bitmap, 0, (ch->capacity + 7)/8);
 
     for (size_t i = 0; i < old.capacity; ++i) {
@@ -288,13 +315,22 @@ UTILS_DEF void hashmap_resize(struct common_hashmap *ch, size_t item_size)
         hashmap_insert__(ch, item_size, (char*)old.items + item_size*i);
     }
 
-    free(old.bitmap);
-    free(old.items);
+    if (ch->ator) {
+        ch->free(ch->ator, old.bitmap, (old.capacity + 7)/8);
+        ch->free(ch->ator, old.items, old.capacity * item_size);
+    } else {
+        free(old.bitmap);
+        free(old.items);
+    }
 }
 
 UTILS_DEF int hashmap_insert__(void *base, size_t item_size, void *item)
 {
     struct common_hashmap *h = base;
+
+    assert(h->compare);
+    assert(h->hashf);
+
     if (h->capacity == 0) {
     resize:
         hashmap_resize(h, item_size);
@@ -334,6 +370,9 @@ UTILS_DEF void *hashmap_get__(void *base, size_t item_size, void *key)
 {
     struct common_hashmap *h = base;
 
+    assert(h->compare);
+    assert(h->hashf);
+
     if (h->capacity == 0) return NULL;
     uint64_t hash = h->hashf(key) % h->capacity;
     void *item;
@@ -371,13 +410,14 @@ UTILS_DEF int sv_eq_cstr(string_view sv, const char *cstr)
     return *cstr == 0;
 }
 
-UTILS_DEF void *arena_alloc(arena *a, size_t n)
+UTILS_DEF void *arena_alloc_ex(arena *a, size_t n, size_t cap)
 {
     n = (n + sizeof(void*) - 1) / sizeof(void*);
+    size_t prev_cap = cap;
  again:
     if (a->capacity == 0) {
-        a->data = malloc(ARENA_CAP);
-        a->capacity = ARENA_CAP/sizeof(void*);
+        a->data = malloc(prev_cap);
+        a->capacity = prev_cap/sizeof(void*);
     }
 
     if (a->used + n >= a->capacity) {
@@ -386,12 +426,19 @@ UTILS_DEF void *arena_alloc(arena *a, size_t n)
         *prev = *a;
         memset(a, 0, sizeof(*a));
         a->prev = prev;
+        assert(prev->capacity);
+        prev_cap = prev->capacity * sizeof(void*) * 2;
         goto again;
     }
 
     void *p = a->data + a->used * sizeof(void *);
     a->used += n;
     return p;
+}
+
+UTILS_DEF void *arena_alloc(arena *a, size_t n)
+{
+    return arena_alloc_ex(a, n, ARENA_CAP);
 }
 
 UTILS_DEF void arena_free(arena *a)
@@ -432,7 +479,8 @@ UTILS_DEF struct nbt_tag *nbt_compound_find_tag(struct nbt_tag *root, const char
 
 static union tag_variant deserialize_tag_variant(enum tag_type type, struct bytes_array *nbt, arena *a)
 {
-    union tag_variant variant = {0};
+    union tag_variant variant;
+    memset(&variant, 0, sizeof variant);
 
     switch (type) {
     case TAG_Byte: {
@@ -654,6 +702,113 @@ UTILS_DEF uint32_t murmur3_32(const uint8_t* key, size_t len, uint32_t seed)
 	h ^= h >> 16;
 	return h;
 }
+
+UTILS_DEF string_view sv_chop(string_view *sv, size_t n)
+{
+    if (sv->count < n) n = sv->count;
+    string_view chopped = {
+        .data = sv->data,
+        .count = n
+    };
+
+    sv->count -= n;
+    sv->data += n;
+    return chopped;
+}
+
+UTILS_DEF string_view sv_chop_by_delim(string_view *sv, int delim)
+{
+    size_t i = 0;
+
+    while (i < sv->count && sv->data[i] != delim) {
+        i++;
+    }
+
+    return sv_chop(sv, i);
+}
+
+UTILS_DEF string_view sv_trim_right(string_view sv)
+{
+    size_t i = 0;
+    while (i < sv.count && isspace(sv.data[sv.count - i - 1])) {
+        i++;
+    }
+
+    return sv_chop(&sv, sv.count - i);
+}
+
+UTILS_DEF string_view sv_trim_left(string_view sv)
+{
+    size_t i = 0;
+    while (i < sv.count && isspace(sv.data[i])) {
+        i++;
+    }
+
+    sv_chop(&sv, i);
+    return sv;
+}
+
+UTILS_DEF string_view sv_trim(string_view sv)
+{
+    return sv_trim_right(sv_trim_left(sv));
+}
+
+UTILS_DEF int sv_to_int(string_view sv)
+{
+    char buf[32];
+    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
+    return atoi(buf);
+}
+
+UTILS_DEF uint64_t sv_to_u64(string_view sv)
+{
+    char buf[32];
+    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
+    return strtoull(buf, NULL, 0);
+}
+
+UTILS_DEF float sv_to_float(string_view sv)
+{
+    char buf[32];
+    snprintf(buf, sizeof buf, SV_Fmt, SV_Arg(sv));
+    return strtof(buf, NULL);
+}
+
+UTILS_DEF string_view sv_chop_while(string_view *sv, int (*pred)(int))
+{
+    size_t i = 0;
+    while (i < sv->count && pred(sv->data[i])) {
+        i++;
+    }
+
+    return sv_chop(sv, i);
+}
+
+UTILS_DEF int sv_read_unicode(string_view *sv)
+{
+#define __X *(uint8_t*)sv_chop(sv, 1).data
+    uint32_t c = __X;
+
+    if (!(c >> 7))        return c;
+    if ((c >> 5) == 6)    return (c & 0x1f) << 6 | (__X & 0x3f);
+    if ((c >> 4) == 0xe)  return (c & 0xf) << 12 | (__X & 0x3f) << 6 | (__X & 0x3f);
+    if ((c >> 3) == 0x1e) return (c & 0x7) << 18 | (__X & 0x3f) << 12
+                              | (__X & 0x3f) << 6 | (__X & 0x3f);
+#undef __X
+    return -1;
+}
+
+UTILS_DEF string_view sv_clone(string_view sv, arena *a)
+{
+    void *data = arena_alloc(a, sv.count);
+    string_view result;
+
+    memcpy(data, sv.data, sv.count);
+    result.data = data;
+    result.count = sv.count;
+    return result;
+}
+
 #endif // UTILS_IMPLEMENTATION
 
 #endif // UTILS_H_
