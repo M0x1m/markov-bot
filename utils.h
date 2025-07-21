@@ -69,6 +69,7 @@ struct common_hashmap;
 
 #define hashmap_get(hm, key) hashmap_get__(hm, sizeof((hm)->items[0]), key)
 #define hashmap_insert(hm, item) hashmap_insert__(hm, sizeof((hm)->items[0]), item)
+#define hashmap_remove(hm, item) hashmap_remove__(hm, sizeof((hm)->items[0]), item)
 #define mandatory_arg(name) mandatory_arg_impl(usage, name, &argv, &argc, program_name)
 
 struct bytes_array {
@@ -325,6 +326,24 @@ UTILS_DEF void hashmap_resize(struct common_hashmap *ch, size_t item_size)
     }
 }
 
+UTILS_DEF int hashmap_remove__(void *base, size_t item_size, void *item)
+{
+    struct common_hashmap *h = base;
+
+    assert(h->compare);
+    assert(h->hashf);
+
+    void *cell = hashmap_get__(base, item_size, item);
+    if (!cell) return 0;
+    size_t idx = (char*)cell - (char*)h->items;
+
+    assert(idx % item_size == 0);
+    idx /= item_size;
+    h->bitmap[idx>>3] &= ~(1<<(idx&7));
+    h->count--;
+    return 1;
+}
+
 UTILS_DEF int hashmap_insert__(void *base, size_t item_size, void *item)
 {
     struct common_hashmap *h = base;
@@ -348,7 +367,7 @@ UTILS_DEF int hashmap_insert__(void *base, size_t item_size, void *item)
     if (limit > h->capacity) limit = h->capacity;
 
     for (size_t i = 0;; i++) {
-        if (!(h->bitmap[hash >> 3] & (1<<(hash&7)))) break;
+        if (!hashmap_have_index(h, hash)) break;
         hash = (hash + 1) % h->capacity;
         if (i > limit) goto resize;
     }
@@ -499,6 +518,7 @@ static union tag_variant deserialize_tag_variant(enum tag_type type, struct byte
     case TAG_String: {
         read_be2(&variant.tag_string.count, 2);
         variant.tag_string.data = bytes_array_shift(nbt, variant.tag_string.count);
+        variant.tag_string = sv_clone(variant.tag_string, a);
     } break;
     case TAG_Float: {
         read_be(variant.tag_float);
