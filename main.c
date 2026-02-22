@@ -43,7 +43,9 @@ int get_addr(const char *name)
     int ret = getaddrinfo(name, NULL, &hint, &result);
     if (ret) return -1;
 
-    return ((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr;
+    int addr = ((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(result);
+    return addr;
 }
 
 struct secure_fd {
