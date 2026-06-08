@@ -187,8 +187,16 @@ int file_read_unicode(FILE *f)
     return -1;
 }
 
-void bytes_append_utf8_codepoint(bot_async_ctx *ctx, struct bytes_array *a, uint32_t c)
+struct unicode_string_builder {
+    struct bytes_array content;
+    size_t utf16_len;
+};
+
+void unicode_string_builder_append_utf8_codepoint(bot_async_ctx *ctx, struct unicode_string_builder *a, uint32_t c)
 {
+    a->utf16_len++;
+    if (c >= 0x10000) a->utf16_len++;
+
     int b = 0, l = 0;
     while (c>>++b)
         ;;
@@ -197,18 +205,18 @@ void bytes_append_utf8_codepoint(bot_async_ctx *ctx, struct bytes_array *a, uint
         ;;
 
     switch (l) {
-    case 1: da_append2(a, c, &ctx->a, arena_realloc); break;
+    case 1: da_append2(&a->content, c, &ctx->a, arena_realloc); break;
     case 2: {
         uint32_t x = c >> 6 | (c & 0x3f) << 8 | 0x80c0;
-        da_append_many2(a, &x, 2, &ctx->a, arena_realloc);
+        da_append_many2(&a->content, &x, 2, &ctx->a, arena_realloc);
     } break;
     case 3: {
         uint32_t x = c >> 12 | (c >> 6 & 0x3f) << 8 | (c & 0x3f) << 16 | 0x8080e0;
-        da_append_many2(a, &x, 3, &ctx->a, arena_realloc);
+        da_append_many2(&a->content, &x, 3, &ctx->a, arena_realloc);
     } break;
     case 4: {
         uint32_t x = c >> 18 | (c >> 12 & 0x3f) << 8 | (c >> 6 & 0x3f) << 16 | (c & 0x3f) << 24 | 0x808080f0;
-        da_append_many2(a, &x, 4, &ctx->a, arena_realloc);
+        da_append_many2(&a->content, &x, 4, &ctx->a, arena_realloc);
     } break;
     }
 }
@@ -351,6 +359,8 @@ int http_get_content_length(bot_async_ctx *ctx)
 struct bot_send_message_closure {
     string_view message;
     int64_t chat_id;
+    int offset;
+    int length;
 };
 
 void async_bot_send_message(bot_async_ctx *ctx, void *data)
@@ -362,6 +372,16 @@ void async_bot_send_message(bot_async_ctx *ctx, void *data)
     free(data);
 
     json_object *message = json_object_new_object();
+    if (msg.length != 0) {
+        json_object *entities = json_object_new_array();
+        json_object *msg_entity = json_object_new_object();
+        json_object_object_add(msg_entity, "type", json_object_new_string("expandable_blockquote"));
+        json_object_object_add(msg_entity, "offset", json_object_new_int(msg.offset));
+        json_object_object_add(msg_entity, "length", json_object_new_int(msg.length));
+        json_object_array_add(entities, msg_entity);
+        json_object_object_add(message, "entities", entities);
+    }
+
     json_object_object_add(message, "chat_id", json_object_new_int64(msg.chat_id));
     json_object *text = json_object_new_string_len(msg.message.data, msg.message.count);
     json_object_object_add(message, "text", text);
@@ -378,15 +398,22 @@ void async_bot_send_message(bot_async_ctx *ctx, void *data)
     bio_read(ctx->bio, (char *) body.data, body.count);
 }
 
-int bot_send_message_sv(struct bot *bot, int64_t chat_id, string_view msg)
+int bot_send_message_quoted_sv(struct bot *bot, int64_t chat_id, string_view msg, int offset, int length)
 {
     struct bot_send_message_closure *data = malloc(sizeof *data + msg.count);
     data->chat_id = chat_id;
     data->message.count = msg.count;
     data->message.data = (char *)(data + 1);
+    data->length = length;
+    data->offset = offset;
     memcpy((void *) data->message.data, msg.data, msg.count);
 
     return bot_add_net_task(bot, async_bot_send_message, data);
+}
+
+int bot_send_message_sv(struct bot *bot, int64_t chat_id, string_view msg)
+{
+    return bot_send_message_quoted_sv(bot, chat_id, msg, 0, 0);
 }
 
 int bot_send_message(struct bot *bot, int64_t chat_id, const char *msg)
@@ -437,11 +464,11 @@ void markov_generate_kernel(struct bot *bot, int (*kernel)[WINDOW_SIZE])
     memcpy(*kernel, prefixes->key, sizeof *kernel);
 }
 
-void kernel_append(bot_async_ctx *ctx, struct bytes_array *acc, int (*kernel)[WINDOW_SIZE])
+void kernel_append(bot_async_ctx *ctx, struct unicode_string_builder *acc, int (*kernel)[WINDOW_SIZE])
 {
     for (int i = 0; i < WINDOW_SIZE; ++i) {
-        bytes_append_utf8_codepoint(ctx, acc, (*kernel)[i]);
-        if ((*kernel)[i] == '@') bytes_append_utf8_codepoint(ctx, acc, 0x200B);
+        unicode_string_builder_append_utf8_codepoint(ctx, acc, (*kernel)[i]);
+        if ((*kernel)[i] == '@') unicode_string_builder_append_utf8_codepoint(ctx, acc, 0x200B);
     }
 }
 
@@ -454,14 +481,14 @@ int kernel_compare(int (*k1)[WINDOW_SIZE], int (*k2)[WINDOW_SIZE])
     return i;
 }
 
-void markov_custom_kernel(bot_async_ctx *ctx, struct bytes_array *acc, int (*kernel)[WINDOW_SIZE], string_view cmd)
+void markov_custom_kernel(bot_async_ctx *ctx, struct unicode_string_builder *acc, int (*kernel)[WINDOW_SIZE], string_view cmd)
 {
     memset(*kernel, 0, sizeof *kernel);
     struct bot *bot = ctx->bot;
 
     while (cmd.count) {
         int r = kernel_move(kernel, sv_read_unicode(&cmd));
-        if (r) bytes_append_utf8_codepoint(ctx, acc, r);
+        if (r) unicode_string_builder_append_utf8_codepoint(ctx, acc, r);
     }
     while (!**kernel) kernel_move(kernel, 0);
 
@@ -479,7 +506,8 @@ void markov_custom_kernel(bot_async_ctx *ctx, struct bytes_array *acc, int (*ker
     }
 
     if (!most_similar) {
-        acc->count = 0;
+        acc->content.count = 0;
+        acc->utf16_len = 0;
         markov_generate_kernel(bot, kernel);
         return;
     }
@@ -500,7 +528,7 @@ void bot_carrot_command(bot_async_ctx *ctx, int64_t chat_id, string_view cmd)
     RAND_bytes((void *) &sym, sizeof sym);
     sym = sym % (800 - 500) + 500;
 
-    struct bytes_array acc = {0};
+    struct unicode_string_builder acc = {0};
     int kernel[WINDOW_SIZE];
 
     if (cmd.count) markov_custom_kernel(ctx, &acc, &kernel, cmd);
@@ -510,12 +538,11 @@ void bot_carrot_command(bot_async_ctx *ctx, int64_t chat_id, string_view cmd)
     for (uint32_t i = 0; i < sym; ++i) {
         int s = markov_generate_subseq(bot, &kernel);
         if (s == -1) break;
-        bytes_append_utf8_codepoint(ctx, &acc, s);
-        if (s == '@') bytes_append_utf8_codepoint(ctx, &acc, 0x200B);
+        unicode_string_builder_append_utf8_codepoint(ctx, &acc, s);
+        if (s == '@') unicode_string_builder_append_utf8_codepoint(ctx, &acc, 0x200B);
     }
 
-    da_append2(&acc, 0, &ctx->a, arena_realloc);
-    bot_send_message(bot, chat_id, acc.items);
+    bot_send_message_quoted_sv(bot, chat_id, sv_from_bytes_array(&acc.content), 0, acc.utf16_len);
 }
 
 void markov_save_prefixes(FILE *f, struct markov_prefixes *prefixes)
