@@ -158,7 +158,7 @@ typedef void (*bot_async_fn)(bot_async_ctx *, void *);
 #define ASYNC_SSL(ssl, ssl_call, pctx)                          \
     do {                                                        \
         int _ret;                                               \
-        while ((_ret = (ssl_call)) < 0) {                       \
+        while ((_ret = (ssl_call)) <= 0) {                       \
             switch (SSL_get_error(ssl, _ret)) {                 \
             case SSL_ERROR_WANT_WRITE:                          \
                 (pctx)->flags = POLLOUT;                        \
