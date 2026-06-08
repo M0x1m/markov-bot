@@ -441,6 +441,7 @@ void kernel_append(bot_async_ctx *ctx, struct bytes_array *acc, int (*kernel)[WI
 {
     for (int i = 0; i < WINDOW_SIZE; ++i) {
         bytes_append_utf8_codepoint(ctx, acc, (*kernel)[i]);
+        if ((*kernel)[i] == '@') bytes_append_utf8_codepoint(ctx, acc, 0x200B);
     }
 }
 
@@ -510,6 +511,7 @@ void bot_carrot_command(bot_async_ctx *ctx, int64_t chat_id, string_view cmd)
         int s = markov_generate_subseq(bot, &kernel);
         if (s == -1) break;
         bytes_append_utf8_codepoint(ctx, &acc, s);
+        if (s == '@') bytes_append_utf8_codepoint(ctx, &acc, 0x200B);
     }
 
     da_append2(&acc, 0, &ctx->a, arena_realloc);
