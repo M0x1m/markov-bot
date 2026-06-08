@@ -825,14 +825,42 @@ void async_bot_set_my_commands(bot_async_ctx *ctx, void *data)
     bio_read(ctx->bio, (char *) body.data, body.count);
 }
 
+int parse_host_port(const char *str, struct sockaddr_in *addr)
+{
+    char *colon = strchr(str, ':');
+    if (!colon) return -1;
+
+    char host[64];
+    size_t host_len = colon - str;
+    if (host_len >= sizeof(host)) return -1;
+    memcpy(host, str, host_len);
+    host[host_len] = '\0';
+
+    unsigned long port = strtoul(colon + 1, NULL, 10);
+    if (port == 0 || port > 65535) return -1;
+
+    if (inet_pton(AF_INET, host, &addr->sin_addr) != 1) return -1;
+    addr->sin_port = htons((uint16_t)port);
+    addr->sin_family = AF_INET;
+    return 0;
+}
+
 int bot_connect(void)
 {
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(443);
-    int host_addr = get_addr(HOST);
-    if (host_addr == -1) return -1;
-    addr.sin_addr.s_addr = host_addr;
+    const char *api_override = getenv("API_OVERRIDE");
+    if (api_override) {
+        if (parse_host_port(api_override, &addr) < 0) {
+            fprintf(stderr, "ERROR: failed to parse host and port\n");
+            abort();
+        }
+    } else {
+        int host_addr = get_addr(HOST);
+        if (host_addr == -1) return -1;
+        addr.sin_addr.s_addr = host_addr;
+    }
 
     int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
 
