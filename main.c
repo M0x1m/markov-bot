@@ -305,7 +305,7 @@ void secure_write(void *handle, const void *buf, int count)
 }
 
 int bot_receive_events(struct bot *);
-int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data);
+int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data, int retry);
 
 void bio_send_cstr(struct bufio *bio, const char *cstr)
 {
@@ -408,7 +408,7 @@ int bot_send_message_quoted_sv(struct bot *bot, int64_t chat_id, string_view msg
     data->offset = offset;
     memcpy((void *) data->message.data, msg.data, msg.count);
 
-    return bot_add_net_task(bot, async_bot_send_message, data);
+    return bot_add_net_task(bot, async_bot_send_message, data, 5);
 }
 
 int bot_send_message_sv(struct bot *bot, int64_t chat_id, string_view msg)
@@ -767,13 +767,15 @@ struct bot_async_closure {
     bot_async_fn func;
     void *data;
     struct bot *bot;
+    int retry;
 };
 
 void async_wrapper(struct pollable *this, void *data)
 {
     struct bot_async_closure *closure = data;
-    struct secure_fd fd;
+    struct secure_fd fd = {0};
     bot_async_ctx ctx = {0};
+    volatile int ok = 0;
 
     ctx.pollable = this;
     ctx.bot = closure->bot;
@@ -782,28 +784,39 @@ void async_wrapper(struct pollable *this, void *data)
     ctx.bio = malloc(sizeof *ctx.bio);
 
     fd.ssl = SSL_new(closure->bot->ssl_ctx);
-    if (fd.ssl == NULL) goto done;
+    if (fd.ssl == NULL) goto done; // this might be more like abort() situation, but whatever
     SSL_set_fd(fd.ssl, this->fd);
     fd.pollable = this;
 
     if (setjmp(this->on_closed)) goto done;
     int ret;
     ASYNC_SSL(fd.ssl, (ret = SSL_connect(fd.ssl)), this);
-    if (ret <= 0) goto done;
 
     bio_init(ctx.bio, &fd, secure_read, secure_write);
 
 func:
     closure->func(&ctx, closure->data);
-
+    ok = 1;
  done:
+    if (this->fd >= 0) {
+        close(this->fd);
+        this->fd = -1;
+    }
+
+    if (!ok && closure->retry) {
+        int retry = closure->retry;
+        if (retry != -1) retry -= 1;
+        this->timeout = 10000;
+        this->flags = 0;
+        co_switch(this->el->ctx);
+        bot_add_net_task(closure->bot, closure->func, closure->data, retry);
+    }
+
     free(closure);
     arena_free(&ctx.a);
     if (fd.ssl) SSL_free(fd.ssl);
     free(ctx.bio);
-
-    if (ctx.pollable->fd >= 0) close(ctx.pollable->fd);
-    ctx.pollable->finished = 1;
+    this->finished = 1;
 
     co_switch(ctx.pollable->el->ctx);
 }
@@ -811,21 +824,9 @@ func:
 void async_bot_event_listener(bot_async_ctx *ctx, void *data)
 {
     (void) data;
-
-    if (setjmp(ctx->pollable->on_closed)) goto end;
-
     for (;;) {
         async_bot_request_get_updates(ctx);
         arena_free(&ctx->a);
-    }
-
- end:
-    close(ctx->pollable->fd);
-    ctx->pollable->fd = -1;
-    while (bot_receive_events(ctx->bot) < 0) {
-        ctx->pollable->timeout = 10000;
-        ctx->pollable->flags = 0;
-        co_switch(ctx->pollable->el->ctx);
     }
 }
 
@@ -898,41 +899,43 @@ int bot_connect(void)
 
     int ret = connect(sock, (struct sockaddr *)&addr, sizeof addr);
     if (ret < 0 && errno != EINPROGRESS) {
+        close(sock);
         return -1;
     }
 
     return sock;
 }
 
-void bot_add_task(struct bot *bot, int fd, bot_async_fn func, void *func_data)
+void bot_add_task(struct bot *bot, int fd, bot_async_fn func, void *func_data, int retry)
 {
     struct bot_async_closure *closure = malloc(sizeof *closure);
 
     closure->bot = bot;
     closure->func = func;
     closure->data = func_data;
+    closure->retry = retry;
 
     event_loop_add(&bot->el, fd, POLLOUT, async_wrapper, closure);
 }
 
-int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data)
+int bot_add_net_task(struct bot *bot, bot_async_fn func, void *func_data, int retry)
 {
     int fd = bot_connect();
     if (fd < 0) return -1;
 
-    bot_add_task(bot, fd, func, func_data);
+    bot_add_task(bot, fd, func, func_data, retry);
 
     return 0;
 }
 
 int bot_set_my_commands(struct bot *bot)
 {
-    return bot_add_net_task(bot, async_bot_set_my_commands, NULL);
+    return bot_add_net_task(bot, async_bot_set_my_commands, NULL, -1);
 }
 
 int bot_receive_events(struct bot *bot)
 {
-    return bot_add_net_task(bot, async_bot_event_listener, NULL);
+    return bot_add_net_task(bot, async_bot_event_listener, NULL, -1);
 }
 
 void bot_event_loop(struct bot *bot)
