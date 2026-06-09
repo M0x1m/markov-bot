@@ -854,7 +854,7 @@ void async_bot_set_my_commands(bot_async_ctx *ctx, void *data)
 
 int parse_host_port(const char *str, struct sockaddr_in *addr)
 {
-    char *colon = strchr(str, ':');
+    const char *colon = strchr(str, ':');
     if (!colon) return -1;
 
     char host[64];
